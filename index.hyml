@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>姓名查詢工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    background: #f5f5f7;
+    margin: 0;
+    padding: 20px;
+    color: #1d1d1f;
+  }
+  .container {
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 20px;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+  .search-box {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  select {
+    flex: 1;
+    padding: 12px 14px;
+    font-size: 16px;
+    border: 1px solid #d2d2d7;
+    border-radius: 10px;
+    outline: none;
+    background: white;
+    color: #1d1d1f;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  select:focus {
+    border-color: #0071e3;
+  }
+  button {
+    padding: 12px 20px;
+    font-size: 16px;
+    background: #0071e3;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  button:active {
+    background: #005bb5;
+  }
+  .status {
+    text-align: center;
+    color: #86868b;
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+  .card {
+    background: white;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .card .name {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 6px;
+    color: #0071e3;
+  }
+  .card .row {
+    display: flex;
+    font-size: 14px;
+    padding: 4px 0;
+    border-top: 1px solid #f0f0f0;
+  }
+  .card .row:first-of-type { border-top: none; }
+  .card .label {
+    color: #86868b;
+    width: 70px;
+    flex-shrink: 0;
+  }
+  .card .value {
+    flex: 1;
+    word-break: break-word;
+  }
+  .updated {
+    text-align: center;
+    color: #b0b0b5;
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+  .refresh-btn {
+    display: block;
+    margin: 0 auto 16px auto;
+    padding: 6px 14px;
+    font-size: 13px;
+    background: transparent;
+    color: #0071e3;
+    border: 1px solid #0071e3;
+    border-radius: 8px;
+  }
+  .refresh-btn:active {
+    background: #eaf3fd;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📋 姓名查詢</h1>
+  <div class="search-box">
+    <select id="nameInput">
+      <option value="">請選擇姓名…</option>
+    </select>
+    <button onclick="doSearch()">查詢</button>
+  </div>
+  <div class="status" id="status">載入資料中…</div>
+  <div class="updated" id="updated"></div>
+  <button class="refresh-btn" onclick="loadData(true)">🔄 重新整理資料</button>
+  <div id="results"></div>
+</div>
+
+<script>
+const SHEET_ID = "1-9ILRCYaOvow9jCJwF2WQHJRTooO0W_hnnpY-NsEKM0";
+const GID = "0"; // 若資料不在第一個工作表，改成該工作表的 gid（在 Google 表單網址列可找到）
+const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
+
+let rows = [];
+let headers = [];
+
+// 簡單 CSV 解析（支援欄位內含逗號、換行、引號）
+function parseCSV(text) {
+  const result = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ""; }
+      else if (c === '\n') { row.push(field); result.push(row); row = []; field = ""; }
+      else if (c === '\r') { /* skip */ }
+      else field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); result.push(row); }
+  return result.filter(r => r.some(c => c.trim() !== ""));
+}
+
+function findCol(candidates) {
+  for (const cand of candidates) {
+    const idx = headers.findIndex(h => h.trim() === cand);
+    if (idx !== -1) return idx;
+  }
+  // 模糊比對（欄位包含關鍵字）
+  for (const cand of candidates) {
+    const idx = headers.findIndex(h => h.includes(cand));
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+let nameCol, orderCol, noteCol;
+
+async function loadData() {
+  const statusEl = document.getElementById("status");
+  try {
+    const res = await fetch(CSV_URL);
+    if (!res.ok) throw new Error("讀取失敗 (" + res.status + ")");
+    const text = await res.text();
+    const parsed = parseCSV(text);
+    headers = parsed[0].map(h => h.trim());
+    rows = parsed.slice(1).map(r => {
+      const obj = {};
+      headers.forEach((h, i) => obj[h] = (r[i] || "").trim());
+      return obj;
+    });
+
+    nameCol = findCol(["姓名", "名字", "Name"]);
+    orderCol = findCol(["單號", "订单号", "訂單編號", "Order"]);
+    noteCol = findCol(["備註", "备注", "Note", "Remark"]);
+
+    if (nameCol === -1) {
+      statusEl.textContent = "⚠️ 找不到「姓名」欄位，請確認表單欄位名稱";
+      return;
+    }
+
+    // 取出姓名欄位的所有唯一值，填入下拉選單
+    const uniqueNames = [...new Set(rows.map(r => r[headers[nameCol]]).filter(v => v))];
+    uniqueNames.sort((a, b) => a.localeCompare(b, "zh-Hant"));
+    const selectEl = document.getElementById("nameInput");
+    uniqueNames.forEach(name => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      selectEl.appendChild(opt);
+    });
+
+    statusEl.textContent = `資料已載入（共 ${rows.length} 筆，${uniqueNames.length} 個姓名），請選擇姓名查詢`;
+  } catch (err) {
+    statusEl.textContent = "⚠️ 載入失敗：" + err.message + "（請確認表單已設為「知道連結的人皆可檢視」）";
+  }
+}
+
+function doSearch() {
+  const keyword = document.getElementById("nameInput").value.trim();
+  const resultsEl = document.getElementById("results");
+  const statusEl = document.getElementById("status");
+  resultsEl.innerHTML = "";
+
+  if (!keyword) {
+    statusEl.textContent = "請選擇姓名";
+    return;
+  }
+  if (nameCol === -1) {
+    statusEl.textContent = "⚠️ 找不到「姓名」欄位";
+    return;
+  }
+
+  const matches = rows.filter(r => r[headers[nameCol]] === keyword);
+
+  if (matches.length === 0) {
+    statusEl.textContent = `找不到符合「${keyword}」的資料`;
+    return;
+  }
+
+  statusEl.textContent = `找到 ${matches.length} 筆符合「${keyword}」的資料`;
+  matches.forEach(r => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const orderVal = orderCol !== -1 ? r[headers[orderCol]] : "（無此欄位）";
+    const noteVal = noteCol !== -1 ? r[headers[noteCol]] : "（無此欄位）";
+    card.innerHTML = `
+      <div class="name">${r[headers[nameCol]]}</div>
+      <div class="row"><div class="label">單號</div><div class="value">${orderVal || "-"}</div></div>
+      <div class="row"><div class="label">備註</div><div class="value">${noteVal || "-"}</div></div>
+    `;
+    resultsEl.appendChild(card);
+  });
+}
+
+document.getElementById("nameInput").addEventListener("change", doSearch);
+
+loadData();
+</script>
+</body>
+</html>
